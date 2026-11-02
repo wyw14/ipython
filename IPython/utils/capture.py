@@ -61,6 +61,36 @@ class RichOutput:
         return self._repr_mime_("image/svg+xml")
 
 
+class LimitedStringIO(StringIO):
+    """StringIO that keeps only the first ``max_chars`` written characters.
+
+    Writes always succeed and characters beyond the cap are discarded; their
+    number is accumulated in ``dropped``. Because each write is truncated at
+    the current boundary, one large write and several smaller writes give the
+    same retained text. ``max_chars=0`` discards every character written.
+    """
+
+    def __init__(self, max_chars: int):
+        super().__init__()
+        self.max_chars = max_chars
+        self.dropped = 0
+        self._retained = 0
+
+    def write(self, __s: str) -> int:
+        remaining = self.max_chars - self._retained
+        n = len(__s)
+        if remaining <= 0:
+            self.dropped += n
+        elif n <= remaining:
+            super().write(__s)
+            self._retained += n
+        else:
+            super().write(__s[:remaining])
+            self.dropped += n - remaining
+            self._retained = self.max_chars
+        return n
+
+
 class CapturedIO:
     """Simple object for containing captured stdout/err and rich display StringIO objects
 
@@ -69,6 +99,10 @@ class CapturedIO:
     - ``c.stdout`` : standard output as a string
     - ``c.stderr`` : standard error as a string
     - ``c.outputs``: a list of rich display outputs
+
+    When a character limit is in effect, ``c.stdout_dropped`` and
+    ``c.stderr_dropped`` report how many characters of each stream were
+    discarded past that limit.
 
     Additionally, there's a ``c.show()`` method which will print all of the
     above in the same order, and can be invoked simply via ``c()``.
@@ -104,6 +138,20 @@ class CapturedIO:
         return self._stderr.getvalue()
 
     @property
+    def stdout_dropped(self) -> int:
+        "Number of stdout characters discarded past the capture limit"
+        if not self._stdout:
+            return 0
+        return getattr(self._stdout, "dropped", 0)
+
+    @property
+    def stderr_dropped(self) -> int:
+        "Number of stderr characters discarded past the capture limit"
+        if not self._stderr:
+            return 0
+        return getattr(self._stderr, "dropped", 0)
+
+    @property
     def outputs(self) -> list[RichOutput]:
         """A list of the captured rich display outputs, if any.
 
@@ -134,10 +182,27 @@ class capture_output:
     stderr = True
     display = True
 
-    def __init__(self, stdout: bool=True, stderr: bool=True, display: bool=True):
+    def __init__(
+        self,
+        stdout: bool=True,
+        stderr: bool=True,
+        display: bool=True,
+        stdout_limit: int | None=None,
+        stderr_limit: int | None=None,
+    ):
+        if stdout_limit is not None and stdout_limit < 0:
+            raise ValueError(
+                f"stdout_limit must be >= 0 or None, got {stdout_limit!r}"
+            )
+        if stderr_limit is not None and stderr_limit < 0:
+            raise ValueError(
+                f"stderr_limit must be >= 0 or None, got {stderr_limit!r}"
+            )
         self.stdout = stdout
         self.stderr = stderr
         self.display = display
+        self.stdout_limit = stdout_limit
+        self.stderr_limit = stderr_limit
         self.shell = None
 
     def __enter__(self) -> CapturedIO:
@@ -156,9 +221,15 @@ class capture_output:
 
         stdout = stderr = outputs = None
         if self.stdout:
-            stdout = sys.stdout = StringIO()
+            if self.stdout_limit is None:
+                stdout = sys.stdout = StringIO()
+            else:
+                stdout = sys.stdout = LimitedStringIO(self.stdout_limit)
         if self.stderr:
-            stderr = sys.stderr = StringIO()
+            if self.stderr_limit is None:
+                stderr = sys.stderr = StringIO()
+            else:
+                stderr = sys.stderr = LimitedStringIO(self.stderr_limit)
         if self.display:
             self.save_display_pub = self.shell.display_pub
             self.shell.display_pub = CapturingDisplayPublisher()

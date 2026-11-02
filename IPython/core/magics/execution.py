@@ -1582,6 +1582,28 @@ class ExecutionMagics(Magics):
         action="store_true",
         help="""Don't capture IPython's rich display."""
     )
+    @magic_arguments.argument(
+        "--stdout-limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="""
+        Keep at most the first N characters of captured stdout; the rest is
+        discarded and counted in the result's ``stdout_dropped`` attribute.
+        0 discards all stdout. Must not be negative.
+        """,
+    )
+    @magic_arguments.argument(
+        "--stderr-limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="""
+        Keep at most the first N characters of captured stderr; the rest is
+        discarded and counted in the result's ``stderr_dropped`` attribute.
+        0 discards all stderr. Must not be negative.
+        """,
+    )
     @cell_magic
     def capture(self, line, cell):
         """run the cell, capturing stdout, stderr, and IPython's rich display() calls."""
@@ -1589,7 +1611,21 @@ class ExecutionMagics(Magics):
         out = not args.no_stdout
         err = not args.no_stderr
         disp = not args.no_display
-        with capture_output(out, err, disp) as io:
+        if args.stdout_limit is not None and args.stdout_limit < 0:
+            raise UsageError(
+                f"--stdout-limit must be >= 0, got {args.stdout_limit}"
+            )
+        if args.stderr_limit is not None and args.stderr_limit < 0:
+            raise UsageError(
+                f"--stderr-limit must be >= 0, got {args.stderr_limit}"
+            )
+        with capture_output(
+            out,
+            err,
+            disp,
+            stdout_limit=args.stdout_limit,
+            stderr_limit=args.stderr_limit,
+        ) as io:
             self.shell.run_cell(cell)
         if DisplayHook.semicolon_at_end_of_expression(cell):
             if args.output in self.shell.user_ns:

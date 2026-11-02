@@ -605,6 +605,75 @@ def test_capture():
         ip.run_cell("'abc' in locals()")
 
 
+def test_capture_limits():
+    """%%capture --stdout-limit/--stderr-limit retain a prefix per channel."""
+    ip = get_ipython()
+
+    # one big write
+    ip.run_cell("%%capture --stdout-limit 5 cap_big\nprint('abcdefghij', end='')")
+    cap_big = ip.user_ns["cap_big"]
+    assert cap_big.stdout == "abcde"
+    assert cap_big.stdout_dropped == 5
+    assert cap_big.stderr == ""
+    assert cap_big.stderr_dropped == 0
+
+    # many small writes give the same retained text and dropped count
+    ip.run_cell(
+        "%%capture --stdout-limit 5 cap_small\n"
+        "for _c in 'abcdefghij':\n"
+        "    print(_c, end='')"
+    )
+    cap_small = ip.user_ns["cap_small"]
+    assert cap_small.stdout == cap_big.stdout
+    assert cap_small.stdout_dropped == cap_big.stdout_dropped
+
+    # per-channel limits, 0 discards the whole stream
+    ip.run_cell(
+        "%%capture --stderr-limit 2 --stdout-limit 0 cap_zero\n"
+        "import sys\n"
+        "print('out')\n"
+        "print('error!', end='', file=sys.stderr)"
+    )
+    cap_zero = ip.user_ns["cap_zero"]
+    assert cap_zero.stdout == ""
+    assert cap_zero.stdout_dropped == 4  # "out\n"
+    assert cap_zero.stderr == "er"
+    assert cap_zero.stderr_dropped == 4  # "ror!"
+    # the cell ran to completion despite the caps
+    assert cap_zero.outputs == []
+
+    # rich display keeps working alongside text limits
+    ip.run_cell(
+        "%%capture --stdout-limit 2 cap_disp\n"
+        "from IPython.display import HTML\n"
+        "display(HTML('<b>hi</b>'))"
+    )
+    cap_disp = ip.user_ns["cap_disp"]
+    assert len(cap_disp.outputs) == 1
+    assert cap_disp.stdout == ""
+
+    # --no-display stays independent of the text limits
+    ip.run_cell(
+        "%%capture --stdout-limit 2 --no-display cap_nodisp\n"
+        "from IPython.display import HTML\n"
+        "display(HTML('<i>x</i>'))"
+    )
+    assert ip.user_ns["cap_nodisp"].outputs == []
+
+    # negative limits fail before the cell body runs
+    ip.user_ns.pop("cap_marker", None)
+    with pytest.raises(UsageError):
+        ip.run_cell_magic(
+            "capture", "--stdout-limit -1 cap_neg", "cap_marker = 99"
+        )
+    assert "cap_marker" not in ip.user_ns
+    with pytest.raises(UsageError):
+        ip.run_cell_magic(
+            "capture", "--stderr-limit -2 cap_neg2", "cap_marker = 99"
+        )
+    assert "cap_marker" not in ip.user_ns
+
+
 def test_doctest_mode():
     "Toggle doctest_mode twice, it should be a no-op and run without error"
     _ip.run_line_magic("doctest_mode", "")
