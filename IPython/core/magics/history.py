@@ -13,6 +13,7 @@
 #-----------------------------------------------------------------------------
 
 # Stdlib
+import json
 import os
 import sys
 from io import open as io_open
@@ -105,6 +106,15 @@ class HistoryMagics(Magics):
         help="""
         when searching history using `-g`, show only unique history.
         """)
+    @argument(
+        '-j', '--json', dest='json', action='store_true', default=False,
+        help="""
+        output history as JSON Lines, with one JSON object per input.
+        Each object has 'session', 'line' and 'source' keys. With -o, an
+        'output' key is added, null when no output was saved. Tabs,
+        newlines and trailing whitespace in the source are preserved, and
+        multiline input is a single object.
+        """)
     @argument('range', nargs='*')
     @skip_doctest
     @line_magic
@@ -113,6 +123,9 @@ class HistoryMagics(Magics):
 
         By default, input history is printed without line numbers so it can be
         directly pasted into an editor. Use -n to show them.
+
+        With -j, the history is printed as JSON Lines, one JSON object per
+        input; this is useful for reading history from scripts.
 
         By default, all input history from the current session is displayed.
         Ranges of history can be indicated using the syntax:
@@ -221,15 +234,29 @@ class HistoryMagics(Magics):
         width = 4
 
         for session, lineno, inline in hist:
-            # Print user history with tabs expanded to 4 spaces.  The GUI
-            # clients use hard tabs for easier usability in auto-indented code,
-            # but we want to produce PEP-8 compliant history for safe pasting
-            # into an editor.
             if get_output:
                 inline, output = inline
             if range_pattern:
                 if not fnmatch.fnmatch(inline, range_pattern):
                     continue
+
+            if args.json:
+                # JSON Lines: one object per input, so tabs, newlines and
+                # trailing whitespace are all kept inside the 'source' value.
+                record = {
+                    "session": session or history_manager.session_number,
+                    "line": lineno,
+                    "source": inline,
+                }
+                if get_output:
+                    record["output"] = output
+                print(json.dumps(record, ensure_ascii=False), file=outfile)
+                continue
+
+            # Print user history with tabs expanded to 4 spaces.  The GUI
+            # clients use hard tabs for easier usability in auto-indented code,
+            # but we want to produce PEP-8 compliant history for safe pasting
+            # into an editor.
             inline = inline.expandtabs(4).rstrip()
 
             multiline = "\n" in inline

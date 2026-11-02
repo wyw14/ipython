@@ -7,6 +7,7 @@
 # stdlib
 import io
 import gc
+import json
 import os
 import sqlite3
 import subprocess
@@ -692,6 +693,98 @@ def test_history_magic_range_with_pattern(hist_magic_shell, capsys):
     out = capsys.readouterr().out
     assert "alpha_match" in out
     assert "beta_nomatch" not in out
+
+
+def _parse_jsonl(text):
+    # Every non-empty physical line must be one JSON object; multiline
+    # inputs must not spill onto extra lines.
+    return [json.loads(line) for line in text.splitlines()]
+
+
+def test_history_magic_json(hist_magic_shell, capsys):
+    ip = hist_magic_shell
+    hm = ip.history_manager
+    hm.db_log_output = True
+    hm.store_inputs(1, "1+1")
+    hm.output_hist_reprs[1] = "2"
+    hm.store_output(1)
+    hm.store_inputs(2, "for i in range(2):\n\tpass")
+    hm.store_inputs(3, "trailing = 1   \n")
+    capsys.readouterr()
+
+    # One JSON object per input; the current session id is used (not 0).
+    ip.run_line_magic("history", "-j")
+    records = _parse_jsonl(capsys.readouterr().out)
+    assert records == [
+        {"session": hm.session_number, "line": 1, "source": "1+1"},
+        {
+            "session": hm.session_number,
+            "line": 2,
+            "source": "for i in range(2):\n\tpass",
+        },
+        {"session": hm.session_number, "line": 3, "source": "trailing = 1   "},
+    ]
+
+    # -o adds the saved output, and null where none was saved.
+    ip.run_line_magic("history", "-j -o")
+    records = _parse_jsonl(capsys.readouterr().out)
+    assert [r["output"] for r in records] == ["2", None, None]
+    assert all(set(r) == {"session", "line", "source", "output"} for r in records)
+
+    # Without -o there is no output key at all.
+    ip.run_line_magic("history", "-j 1")
+    records = _parse_jsonl(capsys.readouterr().out)
+    assert records == [
+        {"session": hm.session_number, "line": 1, "source": "1+1"},
+    ]
+
+    # -l keeps its limit semantics.
+    ip.run_line_magic("history", "-j -l 1")
+    records = _parse_jsonl(capsys.readouterr().out)
+    assert len(records) == 1
+    assert records[0]["line"] == 2
+
+    # -g search works across the same options.
+    ip.run_line_magic("history", "-j -g trailing")
+    records = _parse_jsonl(capsys.readouterr().out)
+    assert records == [
+        {"session": hm.session_number, "line": 3, "source": "trailing = 1   "},
+    ]
+
+    # Pattern within a range is filtered as in the plain mode.
+    ip.run_line_magic("history", "-j 1-3 -g trailing")
+    records = _parse_jsonl(capsys.readouterr().out)
+    assert [r["line"] for r in records] == [3]
+
+
+def test_history_magic_json_to_file(hist_magic_shell, tmp_path, capsys, monkeypatch):
+    from IPython.core.error import StdinNotImplementedError
+
+    ip = hist_magic_shell
+    hm = ip.history_manager
+    hm.store_inputs(1, "filed_json\t= 1\n")
+    outfname = tmp_path / "histout.jsonl"
+
+    ip.run_line_magic("history", "-j -f %s" % outfname)
+    # Nothing human-readable is emitted to stdout when creating the file.
+    assert capsys.readouterr().out == ""
+    records = _parse_jsonl(outfname.read_text(encoding="utf-8"))
+    assert records == [
+        {"session": hm.session_number, "line": 1, "source": "filed_json\t= 1"},
+    ]
+
+    # Overwrite confirmation rules still apply; the prompt never lands in
+    # the JSON Lines data stream.
+    def raiser(*a, **k):
+        raise StdinNotImplementedError()
+
+    monkeypatch.setattr("IPython.utils.io.ask_yes_no", raiser)
+    ip.run_line_magic("history", "-j -f %s" % outfname)
+    assert "Overwriting file." in capsys.readouterr().out
+    records = _parse_jsonl(outfname.read_text(encoding="utf-8"))
+    assert records == [
+        {"session": hm.session_number, "line": 1, "source": "filed_json\t= 1"},
+    ]
 
 
 class _FakeTTYStdin:
