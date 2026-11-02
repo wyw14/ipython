@@ -986,6 +986,130 @@ def test_timeit_invalid_return():
         _ip.run_line_magic("timeit", "return")
 
 
+def _make_timeit_result(all_runs, loops=1, repeat=None, precision=3):
+    """Build a TimeitResult directly from raw batch times without timing code."""
+    per_loop = [run_time / loops for run_time in all_runs]
+    best = min(per_loop) if per_loop else 0.0
+    worst = max(per_loop) if per_loop else 0.0
+    if repeat is None:
+        repeat = len(all_runs)
+    return execution.TimeitResult(
+        loops, repeat, best, worst, list(all_runs), 0.0, precision
+    )
+
+
+def test_timeit_result_compare_average_different_loops():
+    # 10/20/30 s batches over 10 loops -> 1/2/3 s per loop
+    baseline = _make_timeit_result([10.0, 20.0, 30.0], loops=10)
+    # 50/100/150 s batches over 100 loops -> 0.5/1/1.5 s per loop
+    candidate = _make_timeit_result([50.0, 100.0, 150.0], loops=100)
+
+    comparison = execution.TimeitResult.compare(baseline, candidate)
+
+    assert comparison.statistic == "average"
+    assert comparison.baseline_value == pytest.approx(2.0)
+    assert comparison.candidate_value == pytest.approx(1.0)
+    assert comparison.difference == pytest.approx(-1.0)
+    assert comparison.ratio == pytest.approx(0.5)
+    assert comparison.percent_change == pytest.approx(-50.0)
+    assert comparison.baseline_loops == 10
+    assert comparison.candidate_loops == 100
+    assert comparison.baseline_repeat == 3
+    assert comparison.candidate_repeat == 3
+    # the inputs are read-only: samples and order are untouched
+    assert baseline.all_runs == [10.0, 20.0, 30.0]
+    assert candidate.all_runs == [50.0, 100.0, 150.0]
+    assert baseline.timings == [1.0, 2.0, 3.0]
+    assert candidate.timings == [0.5, 1.0, 1.5]
+
+
+def test_timeit_result_compare_median_different_repeat():
+    baseline = _make_timeit_result([1.0, 2.0, 3.0])  # 3 repeats, median 2
+    candidate = _make_timeit_result(
+        [1.0, 2.0, 3.0, 4.0], repeat=4
+    )  # 4 repeats, median 2.5
+
+    comparison = execution.TimeitResult.compare(baseline, candidate, statistic="median")
+
+    assert comparison.statistic == "median"
+    assert comparison.baseline_value == pytest.approx(2.0)
+    assert comparison.candidate_value == pytest.approx(2.5)
+    assert comparison.difference == pytest.approx(0.5)
+    assert comparison.ratio == pytest.approx(1.25)
+    assert comparison.percent_change == pytest.approx(25.0)
+    assert comparison.baseline_repeat == 3
+    assert comparison.candidate_repeat == 4
+    assert comparison.baseline_loops == 1
+    assert comparison.candidate_loops == 1
+
+
+def test_timeit_result_median_even_samples():
+    result = _make_timeit_result([3.0, 1.0, 10.0, 2.0])
+
+    assert result.median == pytest.approx(2.5)
+
+    other = _make_timeit_result([1.0, 2.0, 3.0, 4.0])
+    comparison = execution.TimeitResult.compare(other, result, "median")
+    assert comparison.candidate_value == pytest.approx(2.5)
+    # samples are not sorted in place
+    assert result.timings == [3.0, 1.0, 10.0, 2.0]
+
+
+def test_timeit_result_compare_zero_baseline():
+    baseline = _make_timeit_result([0.0, 0.0, 0.0])
+    candidate = _make_timeit_result([1.0, 2.0])
+
+    comparison = execution.TimeitResult.compare(baseline, candidate)
+
+    assert comparison.baseline_value == 0.0
+    assert comparison.candidate_value == pytest.approx(1.5)
+    assert comparison.difference == pytest.approx(1.5)
+    assert comparison.ratio is None
+    assert comparison.percent_change is None
+    assert "n/a" in repr(comparison)
+
+
+def test_timeit_result_compare_identical_results():
+    result = _make_timeit_result([1.0, 2.0, 3.0, 4.0])
+
+    for statistic in ("average", "median"):
+        comparison = execution.TimeitResult.compare(result, result, statistic=statistic)
+        assert comparison.difference == pytest.approx(0.0)
+        assert comparison.ratio == pytest.approx(1.0)
+        assert comparison.percent_change == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize(
+    "all_runs",
+    [
+        [],
+        [float("nan")],
+        [float("inf")],
+        [float("-inf")],
+        [-1.0, 2.0],
+    ],
+)
+def test_timeit_result_compare_invalid_samples(all_runs):
+    valid = _make_timeit_result([1.0, 2.0])
+    invalid = _make_timeit_result(all_runs)
+
+    with pytest.raises(ValueError):
+        execution.TimeitResult.compare(invalid, valid)
+    with pytest.raises(ValueError):
+        execution.TimeitResult.compare(valid, invalid)
+
+
+def test_timeit_result_compare_invalid_arguments():
+    result = _make_timeit_result([1.0, 2.0])
+
+    with pytest.raises(TypeError):
+        execution.TimeitResult.compare("not a result", result)
+    with pytest.raises(TypeError):
+        execution.TimeitResult.compare(result, 42)
+    with pytest.raises(ValueError):
+        execution.TimeitResult.compare(result, result, statistic="mode")
+
+
 def test_timeit_raise_on_interrupt():
     ip = get_ipython()
 

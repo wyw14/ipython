@@ -8,6 +8,7 @@ import ast
 import builtins as builtin_mod
 import gc
 import itertools
+import math
 import os
 import re
 import shlex
@@ -50,6 +51,9 @@ from IPython.core.magics.ast_mod import ReplaceCodeTransformer
 #-----------------------------------------------------------------------------
 # Magic implementation classes
 #-----------------------------------------------------------------------------
+
+# Statistics usable when comparing two TimeitResult objects
+_TIMEIT_COMPARISON_STATISTICS = ("average", "median")
 
 
 class TimeitResult:
@@ -95,6 +99,65 @@ class TimeitResult:
         mean = self.average
         return (math.fsum([(x - mean) ** 2 for x in self.timings]) / len(self.timings)) ** 0.5
 
+    @property
+    def median(self):
+        """Median time per loop across all repeats (in seconds).
+
+        For an even number of repeats this is the mean of the two middle
+        values.
+        """
+        n = len(self.timings)
+        if n == 0:
+            raise ValueError("no timing samples available")
+        ordered = sorted(self.timings)
+        midpoint = n // 2
+        if n % 2:
+            return ordered[midpoint]
+        return (ordered[midpoint - 1] + ordered[midpoint]) / 2
+
+    @staticmethod
+    def compare(baseline, candidate, statistic="average"):
+        """Compare two existing :class:`TimeitResult` objects.
+
+        ``baseline`` and ``candidate`` are the two ``%timeit -o`` results to
+        compare. ``statistic`` selects ``"average"`` (the default) or
+        ``"median"``; both are computed in seconds per loop from
+        :attr:`timings`, never from the undivided :attr:`all_runs` batch
+        times.
+
+        This only reads the two results: it does not re-run any timed code
+        and it does not modify either object. The returned ratio is a plain
+        ratio of two point estimates; it is not a test of statistical
+        significance and does not guarantee a speedup on any other run.
+
+        Raises ``TypeError`` if either argument is not a ``TimeitResult``,
+        ``ValueError`` for an unknown ``statistic`` or for results with no
+        samples or with non-finite or negative samples.
+        """
+        if not isinstance(baseline, TimeitResult):
+            raise TypeError(
+                "baseline must be a TimeitResult, got %s" % type(baseline).__name__
+            )
+        if not isinstance(candidate, TimeitResult):
+            raise TypeError(
+                "candidate must be a TimeitResult, got %s" % type(candidate).__name__
+            )
+        if statistic not in _TIMEIT_COMPARISON_STATISTICS:
+            raise ValueError(
+                "statistic must be 'average' or 'median', got %r" % (statistic,)
+            )
+        _validate_timeit_samples(baseline, "baseline")
+        _validate_timeit_samples(candidate, "candidate")
+        if statistic == "average":
+            baseline_value = baseline.average
+            candidate_value = candidate.average
+        else:
+            baseline_value = baseline.median
+            candidate_value = candidate.median
+        return TimeitResultComparison(
+            statistic, baseline_value, candidate_value, baseline, candidate
+        )
+
     def __str__(self):
         pm = '+-'
         if hasattr(sys.stdout, 'encoding') and sys.stdout.encoding:
@@ -116,6 +179,98 @@ class TimeitResult:
     def _repr_pretty_(self, p , cycle):
         unic = self.__str__()
         p.text("<TimeitResult : " + unic + ">")
+
+
+def _validate_timeit_samples(result, label):
+    """Check that a TimeitResult holds usable per-loop timing samples."""
+    samples = result.timings
+    if len(samples) == 0:
+        raise ValueError("%s has no timing samples" % label)
+    for sample in samples:
+        if not math.isfinite(sample):
+            raise ValueError(
+                "%s contains non-finite timing sample: %r" % (label, sample)
+            )
+        if sample < 0:
+            raise ValueError("%s contains negative timing sample: %r" % (label, sample))
+
+
+class TimeitResultComparison:
+    """
+    Structured comparison of two :class:`TimeitResult` objects.
+
+    Returned by :meth:`TimeitResult.compare`. All timing values are in
+    seconds per loop. ``ratio`` and ``percent_change`` compare two point
+    estimates only; they are not tests of statistical significance and do
+    not guarantee a speedup on any other run.
+
+    Attributes
+    ----------
+    statistic : str
+        ``"average"`` or ``"median"``, the statistic used on each side.
+    baseline_value, candidate_value : float
+        Per-loop statistic of the baseline and the candidate.
+    difference : float
+        Candidate value minus baseline value, in seconds.
+    ratio : float or None
+        Candidate value divided by baseline value. ``None`` when the
+        baseline value is zero, in which case a ratio is undefined.
+    percent_change : float or None
+        ``(candidate - baseline) / baseline * 100``, in percent. ``None``
+        when the baseline value is zero.
+    baseline_loops, candidate_loops : int
+        ``loops`` of each result, retained to interpret the values.
+    baseline_repeat, candidate_repeat : int
+        ``repeat`` of each result, retained to interpret the values.
+    """
+
+    def __init__(self, statistic, baseline_value, candidate_value, baseline, candidate):
+        self.statistic = statistic
+        self.baseline_value = baseline_value
+        self.candidate_value = candidate_value
+        self.difference = candidate_value - baseline_value
+        self.baseline_loops = baseline.loops
+        self.candidate_loops = candidate.loops
+        self.baseline_repeat = baseline.repeat
+        self.candidate_repeat = candidate.repeat
+        self._precision = min(baseline._precision, candidate._precision)
+        if baseline_value == 0:
+            # The difference is still defined, but dividing by a zero
+            # baseline gives no meaningful ratio or percentage.
+            self.ratio = None
+            self.percent_change = None
+        else:
+            self.ratio = candidate_value / baseline_value
+            self.percent_change = (
+                (candidate_value - baseline_value) / baseline_value * 100
+            )
+
+    def __repr__(self):
+        ratio = "n/a" if self.ratio is None else "%.3g" % self.ratio
+        percent_change = (
+            "n/a" if self.percent_change is None else "%+.2f%%" % self.percent_change
+        )
+        return (
+            "<TimeitResultComparison: {statistic} baseline {baseline} "
+            "(loops={baseline_loops}, repeat={baseline_repeat}) vs "
+            "candidate {candidate} (loops={candidate_loops}, "
+            "repeat={candidate_repeat}); difference {difference} per loop; "
+            "candidate/baseline ratio {ratio}; change {percent_change}>"
+        ).format(
+            statistic=self.statistic,
+            baseline=_format_time(self.baseline_value, self._precision),
+            candidate=_format_time(self.candidate_value, self._precision),
+            difference=_format_time(self.difference, self._precision),
+            baseline_loops=self.baseline_loops,
+            candidate_loops=self.candidate_loops,
+            baseline_repeat=self.baseline_repeat,
+            candidate_repeat=self.candidate_repeat,
+            ratio=ratio,
+            percent_change=percent_change,
+        )
+
+    def _repr_pretty_(self, p, cycle):
+        p.text(repr(self))
 
 
 class TimeitTemplateFiller(ast.NodeTransformer):
