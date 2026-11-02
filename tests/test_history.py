@@ -694,6 +694,114 @@ def test_history_magic_range_with_pattern(hist_magic_shell, capsys):
     assert "beta_nomatch" not in out
 
 
+def test_history_magic_regex_input_output(hist_magic_shell, capsys):
+    ip = hist_magic_shell
+    hm = ip.history_manager
+    hm.db_log_output = True
+    hm.store_inputs(1, "alpha_input = 1")
+    hm.output_hist_reprs[1] = "first_output"
+    hm.store_output(1)
+    hm.store_inputs(2, "beta_input = 2")
+    hm.output_hist_reprs[2] = "second_output"
+    hm.store_output(2)
+    hm.store_inputs(3, "gamma_no_output = 3")
+    hm.writeout_cache()
+    capsys.readouterr()
+
+    # -r matches input cells only: a pattern found in outputs but not
+    # inputs matches nothing.
+    ip.run_line_magic("history", "-r alpha")
+    out = capsys.readouterr().out
+    assert "alpha_input" in out
+    assert "beta_input" not in out
+    assert "first_output" not in out
+
+    ip.run_line_magic("history", "-r first_output")
+    assert capsys.readouterr().out == ""
+
+    # The pattern is a real regex, not a literal substring.
+    ip.run_line_magic("history", r"-r ^(alpha|gamma)_")
+    out = capsys.readouterr().out
+    assert "alpha_input" in out
+    assert "gamma_no_output" in out
+    assert "beta_input" not in out
+
+    # -R matches outputs only, implies -o (output is printed too), and
+    # entries without an output never match.
+    ip.run_line_magic("history", "-R second")
+    out = capsys.readouterr().out
+    assert "beta_input" in out
+    assert "second_output" in out
+    assert "alpha_input" not in out
+    assert "gamma_no_output" not in out
+
+    # A pattern found only in inputs never matches the output filter.
+    ip.run_line_magic("history", "-R alpha_input")
+    assert capsys.readouterr().out == ""
+
+    # The two filters combine with AND semantics.
+    ip.run_line_magic("history", "-r beta -R second")
+    out = capsys.readouterr().out
+    assert "beta_input" in out
+    assert "second_output" in out
+
+    ip.run_line_magic("history", "-r alpha -R second")
+    assert capsys.readouterr().out == ""
+
+    # Regex filters apply to full multiline cells, not just one line.
+    hm.store_inputs(4, "multi_cell = [\n    'multi_marker',\n]")
+    hm.writeout_cache()
+    capsys.readouterr()
+    ip.run_line_magic("history", "-r multi_marker")
+    assert "multi_cell" in capsys.readouterr().out
+
+
+def test_history_magic_regex_with_grep(hist_magic_shell, capsys):
+    ip = hist_magic_shell
+    hm = ip.history_manager
+    hm.db_log_output = True
+    hm.store_inputs(1, "rx_alpha = 1")
+    hm.output_hist_reprs[1] = "rx_out_one"
+    hm.store_output(1)
+    hm.writeout_cache()
+    hm.reset(new_session=True)
+    hm.store_inputs(1, "rx_beta = 2")
+    hm.output_hist_reprs[1] = "rx_out_two"
+    hm.store_output(1)
+    hm.writeout_cache()
+    capsys.readouterr()
+
+    # -r composes with -g across sessions (which prints session/line).
+    ip.run_line_magic("history", "-g -r rx_")
+    out = capsys.readouterr().out
+    assert out.count("rx_alpha") == 1
+    assert out.count("rx_beta") == 1
+
+    # -R searches outputs stored in the database for old sessions.
+    ip.run_line_magic("history", "-g -R out_two")
+    out = capsys.readouterr().out
+    assert "rx_beta" in out
+    assert "rx_out_two" in out
+    assert "rx_alpha" not in out
+
+    # glob (-g) and the regex filters apply together.
+    ip.run_line_magic("history", "-g alpha -r rx_ -R out_one")
+    out = capsys.readouterr().out
+    assert "rx_alpha" in out
+    assert "rx_out_one" in out
+    assert "rx_beta" not in out
+
+
+def test_history_magic_regex_invalid(hist_magic_shell):
+    from IPython.core.error import UsageError
+
+    ip = hist_magic_shell
+    with pytest.raises(UsageError):
+        ip.run_line_magic("history", "-r (unclosed")
+    with pytest.raises(UsageError):
+        ip.run_line_magic("history", "-R [bad")
+
+
 class _FakeTTYStdin:
     def isatty(self):
         return True

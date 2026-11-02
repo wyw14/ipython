@@ -14,12 +14,13 @@
 
 # Stdlib
 import os
+import re
 import sys
 from io import open as io_open
 import fnmatch
 
 # Our own packages
-from IPython.core.error import StdinNotImplementedError
+from IPython.core.error import StdinNotImplementedError, UsageError
 from IPython.core.magic import Magics, magics_class, line_magic
 from IPython.core.magic_arguments import (argument, magic_arguments,
                                           parse_argstring)
@@ -32,6 +33,14 @@ from IPython.utils import io
 
 
 _unspecified = object()
+
+
+def _compile_regex(pattern, option):
+    """Compile a history filter pattern, reporting it as a magic usage error."""
+    try:
+        return re.compile(pattern)
+    except re.error as e:
+        raise UsageError("Invalid regular expression for %s: %s" % (option, e)) from e
 
 
 @magics_class
@@ -105,6 +114,23 @@ class HistoryMagics(Magics):
         help="""
         when searching history using `-g`, show only unique history.
         """)
+    @argument(
+        '-r', '--input-regex', dest='input_regex', metavar='PATTERN',
+        default=None,
+        help="""
+        filter the history by a Python regular expression, matched
+        against each input cell with re.search. Can be combined with
+        `-g`, ranges and `-R/--output-regex`; all filters must match.
+        """)
+    @argument(
+        '-R', '--output-regex', dest='output_regex', metavar='PATTERN',
+        default=None,
+        help="""
+        filter the history by a Python regular expression, matched
+        against each cell's output with re.search. Implies `-o`, so the
+        matching outputs are printed along with their inputs. Entries
+        without an output never match.
+        """)
     @argument('range', nargs='*')
     @skip_doctest
     @line_magic
@@ -138,6 +164,11 @@ class HistoryMagics(Magics):
         Multiple ranges can be entered, separated by spaces
 
         The same syntax is used by %macro, %save, %edit, %rerun
+
+        History can be filtered by regular expressions: ``-r PATTERN``
+        matches the input cells, and ``-R PATTERN`` matches their outputs
+        (which implies ``-o``). Matching uses :func:`re.search`, and the two
+        filters can be combined, e.g. ``%history -r "def \\w+" -R "Error"``.
 
         Examples
         --------
@@ -192,6 +223,15 @@ class HistoryMagics(Magics):
         pyprompts = args.pyprompts
         raw = args.raw
 
+        input_re = None
+        output_re = None
+        if args.input_regex is not None:
+            input_re = _compile_regex(args.input_regex, "-r/--input-regex")
+        if args.output_regex is not None:
+            output_re = _compile_regex(args.output_regex, "-R/--output-regex")
+            # Outputs have to be fetched to match against them.
+            get_output = True
+
         pattern = None
         limit = None if args.limit is _unspecified else args.limit
 
@@ -225,11 +265,18 @@ class HistoryMagics(Magics):
             # clients use hard tabs for easier usability in auto-indented code,
             # but we want to produce PEP-8 compliant history for safe pasting
             # into an editor.
+            output = None
             if get_output:
                 inline, output = inline
             if range_pattern:
                 if not fnmatch.fnmatch(inline, range_pattern):
                     continue
+            if input_re is not None and input_re.search(inline) is None:
+                continue
+            if output_re is not None and (
+                output is None or output_re.search(output) is None
+            ):
+                continue
             inline = inline.expandtabs(4).rstrip()
 
             multiline = "\n" in inline
